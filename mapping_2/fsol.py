@@ -2,30 +2,33 @@
 # -*- coding: utf-8 -*-
 
 import numpy as np
+from mapping_2 import ko, go
+from nutils import function
+
 import abc
 
-from numba import jit, njit, int64, float64, prange
+from numba import jit, njit, int64, float64, prange, types
 from functools import wraps, reduce, partial
 from scipy import interpolate, sparse, optimize
 from nutils import matrix, log
 from collections import OrderedDict
-from . import go
 
 NUMBA_WARNINGS = 1
 NUMBA_DEBUG_ARRAY_OPT_STATS = 1
 
 
 '''
-    XXX: no support for O-grids, change this in the long run.
+    XXX: O-grid functionality added. Implement the jacobians
+    for all methods.
 '''
 
 
 def blockshaped( arr, nrows, ncols ):
     """
-        Array ``arr`` of shape ( h, w ) becomes of shape
-        ( -1, nrows, ncols ), where arr_reshaped[i] contains the entries of
-        the i-th ( h // nrows, w // ncols ) block (going from left to right,
-        top to bottom) in ``arr``.
+    Array ``arr`` of shape ( h, w ) becomes of shape
+    ( -1, nrows, ncols ), where arr_reshaped[i] contains the entries of
+    the i-th ( h // nrows, w // ncols ) block (going from left to right,
+    top to bottom) in ``arr``.
     """
     h, w = arr.shape
     return arr.reshape(h // nrows, nrows, -1, ncols) \
@@ -60,7 +63,7 @@ def make_quadrature( g, order ):
     return quad, weights, len( x )
 
 
-def make_supports( g ):
+def make_supports( knotvector: ko.KnotObject ):
 
     """
         Return tuple of tuples containing the indices on which the basis
@@ -68,42 +71,26 @@ def make_supports( g ):
         Will also work with ``ko.TensorKnotVector`` input argument.
     """
 
-    if len( g ) > 2:
-        raise NotImplementedError( 'Dimensionalities >2 are \
-                                            currently not supported.' )
+    p = knotvector.degree
 
-    K = np.arange( np.prod( g.ndims ), dtype=int )  # global index
-    IJ = zip( *np.unravel_index( K, g.ndims ) )  # local index
+    def _knotspan( knotobject ):
+        kv, km = knotobject.knots, knotobject.knotmultiplicities
+        ret = np.repeat( np.arange(len(kv) - 1, dtype=int), km[:-1] )
 
-    kvkm = [ g.knots, g.knotmultiplicities ]
+        if knotobject.periodic:
+            p = knotobject.degree
+            km0 = km[0]
+            head = ret[ -p - 1 + km0: ]
+            ret = np.concatenate( [ head, ret ] )
+
+        return ret
 
     # same as g.extend_knots(), however with g.knots replaced by
     # ascending integers
-    knotspan = \
-        [ np.repeat( np.arange(len(kv), dtype=int), km )
-                                          for kv, km in zip( *kvkm ) ]
-
-    support = lambda ij: \
-        tuple( ks[i: i+p+2] for i, ks, p in zip(ij, knotspan, g.degree) )
-
-    supports = tuple( support(ij) for ij in IJ )
+    knotspan = _knotspan( knotvector )
+    supports = tuple( np.unique( knotspan[i: i+p+1] ) for i in range(knotvector.dim) )
 
     return supports
-
-
-def slice_supports( supports ):
-
-    """
-        supports = tuple( ..., tuple( arr0_i, arr1_i, ... ), ... )
-        becomes tuple( tuple( arr0_0, arr0_1, ...) , ... ).
-        For use in ``neighbours``.
-        XXX: possibly make this jit-compiled.
-    """
-
-    inner_N = len( supports[0] )
-
-    return tuple( tuple( s[i] for s in supports )
-                                        for i in range(inner_N) )
 
 
 def neighbours( supports, p ):
@@ -117,14 +104,19 @@ def neighbours( supports, p ):
     """
 
     N = len( supports )
+
     LoL = []
     for i, s in enumerate( supports ):
         neighbours = []
-        inner = np.arange( i-p, i+p+1, dtype=int )
-        for j in np.unique( np.clip( inner, 0, N-1 ) ):
-            if len( np.intersect1d( supports[j], s ) ) != 0:
+        inner = np.arange( i-p, i+p+1, dtype=int ) % N
+        for j in inner:
+            try:
+                support = supports[j]
+            except IndexError:
+                continue
+            if len( np.intersect1d( support, s ) ) != 0:
                 neighbours.append( j )
-        LoL.append( neighbours )
+        LoL.append( sorted(neighbours) )
     return LoL
 
 
@@ -143,13 +135,20 @@ def tensor_neighbours( *neighbours ):
     for neigh in neighbours:
         N = len( neigh )
         mat = sparse.lil_matrix( (N, N) )
-        mat.rows = neigh
-        mat.data = [ np.ones( len(r) ) for r in mat.rows ]
+        mat.rows = np.array([ n for n in neigh ], dtype=object )
+        mat.data = np.array([ np.ones( len(r) ) for r in mat.rows ], dtype=object )
         mats.append( mat )
 
     M = reduce( sparse.kron, mats ) if len( mats ) > 1 else mat
 
-    return M.tolil().rows
+    # for some reason M.rows() gives the wrong number of nonzeros
+    # however, M.nonzero() works fine.
+    # possibly write some jit-compiled functionality for this in the long run
+    rows = [ [] for i in range(M.shape[0]) ]
+    for i, j in zip( *M.nonzero() ):
+        rows[i].append(j)
+
+    return np.array( rows, dtype=object )
 
 
 def make_lilrows( g ):
@@ -162,9 +161,7 @@ def make_lilrows( g ):
     """
 
     # make supports and slice them
-    knotvectors = [ g.knotvector.at(i) for i in range( len(g) ) ]
-    supports = [ slice_supports( make_supports(k) )[0]
-                                                for k in knotvectors ]
+    supports = [ make_supports(k) for k in g.knotvector ]
     # make list of univariate neighbours
     uneighbours = [ neighbours(s, p)
                                 for s, p in zip(supports, g.degree) ]
@@ -440,17 +437,6 @@ def root( I, init=None, order=1, jac_options=None, **scipyargs ):
     return optimize.nonlin.nonlin_solve( res, init, jacobian=jac, **scipyargs )
 
 
-def anderson( I, **scipyargs ):
-
-    scipyargs.setdefault( 'verbose', True )
-    scipyargs.setdefault( 'f_tol', 1e-5 )
-
-    res = I.residual
-    init = I._g.x[ I._g.dofindices ]
-
-    return optimize.anderson( res, init, **scipyargs )
-
-
 def clip_from_zero( A, eps=1e-6 ):
     A[ A < 0 ] = np.clip( A[ A < 0 ], -np.inf, -eps )
     A[ A > 0 ] = np.clip( A[ A > 0 ], eps, np.inf )
@@ -473,19 +459,59 @@ class WEvalDict( dict ):
         dict.__setitem__( self, key, value )
 
 
+def tck( g ):
+
+    '''
+        tck function that allows for periodic gridobjects
+        (only in one direction).
+    '''
+
+    knots = g.extend_knots().copy()
+    periodic, p, s = g.periodic, g.degree, list( g.ndims )
+
+    assert len( periodic ) in (0, 1)
+
+    nperiodicfuncs = [ p_ - g.knotmultiplicities[j][0] + 1
+        for j, p_ in enumerate(p) ]
+    slicedict = { 0: ( slice( 0, nperiodicfuncs[0] ), slice( None ) ),
+           1: ( slice( None ), slice( 0, nperiodicfuncs[1] ) ) }
+    for i in periodic:
+        sl = slicedict[i]
+        # this is necessary at the moment because the expand is not cut
+        # on the right side if knot multiplicities are present at xi=0
+        # change this in the future.
+        knots[i] = knots[i][ : np.where( knots[i] == 1 )[0][0] + p[i] + 1 ]
+
+    def _f( c ):
+        if len(periodic):
+            i = periodic[0]
+            c = \
+                np.concatenate( [ c.reshape(s), c.reshape(s)[sl] ],
+                    axis=i ).ravel()
+        return c
+
+    def func( c ):
+        return ( *knots, _f(c), *p )
+
+    return func
+
+
 class FastSolver( abc.ABC ):
 
     """ Main class for integration """
 
-    _tck = lambda self, c: ( *self._g.extend_knots(), c, *self._g.degree )
+    def _tck( self, c ):
+        if not hasattr( self, '__tck' ):
+            self.__tck = tck( self._g )
+        return self.__tck( c )
 
     def _splev( self, i, quad, **scipyargs ):
 
         ''' Function evaluation for building the test & trial space tabulation '''
 
-        assert i < 2 * self._N
+        assert i < self._N
         return interpolate.bisplev( *quad,
-                self._tck(unit_vector(2 * self._N, i)), **scipyargs )
+                self._tck(unit_vector(self._N, i)), **scipyargs )
 
     def _w_eval( self, item ):
 
@@ -518,14 +544,16 @@ class FastSolver( abc.ABC ):
         """
 
         supports = self._supports
+        ndims = self._g.ndims
         n, m = [ len(k) - 1 for k in self._g.knots ]
         f = lambda i, j: i * m + j  # global element index
         LoL = []
         for i in range( self._N ):
             L = []
-            xi, eta = supports[i]
-            for x in range( xi[0], xi[-1] ):
-                for y in range( eta[0], eta[-1] ):
+            # select the univariate supports of the i-th basis function
+            xi, eta = [ s[i_] for s, i_ in zip(supports, np.unravel_index(i, ndims)) ]
+            for x in xi:
+                for y in eta:
                     L.append( f(x, y) )
             LoL.append( sorted(L) )
         self._LoL = LoL
@@ -533,7 +561,7 @@ class FastSolver( abc.ABC ):
 
     def __init__( self, g, order ):
 
-        if len( g ) != 2 or len( g.periodic ) != 0:
+        if len( g ) != 2:
             raise NotImplementedError
 
         assert order >= 2
@@ -542,18 +570,31 @@ class FastSolver( abc.ABC ):
         self._N = len( self._g.basis )
         self._feval = 0  # counts the number of residual evaluations
 
-        self._supports = make_supports(g)
+        self._supports = tuple( make_supports(k) for k in g.knotvector )
         self._quad, self._weights, c = make_quadrature( g, order )
         self._chunklengths = [c] * len(g)
         self._quadweights = blockshaped( self._weights, *self._chunklengths )
 
-        chunk = \
-            lambda i: tuple( q[ s[0]*c: s[-1]*c ] for q, s in
-                zip( self._quad, self._supports[i] )
-            )
         # _chunks[i] corresponds to all nonzero quadrature points of w_i
         # *_chunks[i] can be utilized in the self._tck function
         # XXX: try to replace this using numpy strides
+
+        # reshape the i-th univariate quadrature points into shape (-1, c)
+        # and select the rows that correspond to the univariate supports
+        # of the i-th basis function.
+
+        def chunk(i):
+            ndims = g.ndims
+
+            localindex = ( s[i_] for s, i_
+                in zip(self._supports, np.unravel_index(i, ndims)) )
+
+            return \
+                tuple(
+                    q.reshape([-1, c])[ locindex ].ravel() for q, locindex in
+                    zip( self._quad, localindex )
+                )
+
         self._chunks = tuple( chunk(i) for i in range(self._N) )
 
         self._w = WEvalDict()
@@ -564,7 +605,7 @@ class FastSolver( abc.ABC ):
         self._lilstart = \
             np.array( [0] + [ len(l) for l in self._lilrows ] ).cumsum()
 
-        self._lilrows_flat = np.concatenate( self._lilrows )
+        self._lilrows_flat = np.concatenate( self._lilrows ).astype( np.int64 )
 
         self._jitsupportlength = \
             np.array( [0] + [ len(l) for l in self._LoL ] ).cumsum()
@@ -582,13 +623,14 @@ class FastSolver( abc.ABC ):
         """
             Return blockshaped function evaluations (for test and trial spaces)
         """
-
         try:
             ret = self._w[key]
         except KeyError:
             ret = self._w_eval(key)
             log.info( key + ' has been tabularized.' )
             self._w[key] = ret
+        except Exception as ex:
+            raise Exception( 'Failed with unknown exception {}.'.format(ex) )
         finally:
             return ret
 
@@ -656,14 +698,24 @@ class FastSolver( abc.ABC ):
 
     """ Jitted arrays """
 
-    def jitmass( self, mul=None, w='w' ):
+    def jitmass( self, mul=None, test=None, trial=None ):
+
+        if test is None:
+            test = 'w'
+
+        if trial is None:
+            trial = 'w'
+
         if mul is not None:
             weights = self._quadweights * blockshaped( mul, *self._chunklengths )
         else:
             weights = self._quadweights
-        w = self[w]
+
+        v = self[test]
+        w = self[trial]
+
         m = len( self._g.knots[1] ) - 1
-        arr = jitmass( self._N, m, w, w, weights, self._jitsupportlength,
+        arr = jitmass( self._N, m, v, w, weights, self._jitsupportlength,
                 self._LoL_flat, self._lilstart, self._lilrows_flat )
         return self.vec_to_mat( self.tolil(arr) )
 
@@ -742,7 +794,8 @@ class Elliptic( FastSolver ):
         mul0 = ( g22 * dx[0] - 2 * g12 * dx[1] + g11 * dx[2] ) / scale
         mul1 = ( g22 * dy[0] - 2 * g12 * dy[1] + g11 * dy[2] ) / scale
 
-        return np.concatenate( [self.jitarray(mul=mul0), self.jitarray(mul=mul1)] ) + self._rhs
+        return np.concatenate( [self.jitarray(mul=mul0), self.jitarray(mul=mul1)] ) \
+            + self._rhs
 
 
 class EllipticControl( Elliptic ):
@@ -859,6 +912,7 @@ class EllipticControl( Elliptic ):
                     '''
                         Warning, using a control mapping whose knotvector is
                         not a subset of the target GridObject knotvector
+                        or that does not have the same periodicity properties
                         is not recommended, since Gaussian quadrature is
                         ill-defined in this case.
                     '''
@@ -1012,11 +1066,28 @@ class MixedFEM( FastSolver ):
         self._M_inv = sparse.linalg.splu( self.M.tocsc() )
         self._eps = eps
 
+    @property
+    def dindices( self ):
+        if not hasattr( self, '_dindices' ):
+            N = self._N
+            self._dindices = \
+                np.concatenate( [np.arange(2 * N), self._g.dofindices + 2 * N] )
+        return self._dindices
+
     @mixed_FEM_BC
     def residual( self, c: NamedArray ):
+
+        '''
+            Residual for Newton-Krylov.
+            The first two block-entries are scaled by the inverse of the mass
+            matrix for better convergence.
+        '''
+
         u, v, x, y = list(c)
         f, s = self.fderivs, self.sderivs
         g11, g12, g22 = self.metric( np.concatenate( [x, y] ) )
+
+        # index in (0, 1) for now, index == (0, 1) is not supported yet
         index = self._coordinate_directions[0]
 
         scale = g11 + g22 + self._eps
@@ -1035,19 +1106,148 @@ class MixedFEM( FastSolver ):
         res1 = np.concatenate( [ arr(mul0 / scale), arr(mul1 / scale) ] )
         return np.concatenate( [ -res0, res1[self._g.dofindices] ] )
 
+    @mixed_FEM_BC
+    def jacresidual( self, c: NamedArray ):
+        u, v, x, y = list(c)
+        f, s = self.fderivs, self.sderivs
+        g11, g12, g22 = self.metric( np.concatenate( [x, y] ) )
+
+        # index in (0, 1) for now, index == (0, 1) is not supported yet
+        index = self._coordinate_directions[0]
+
+        scale = g11 + g22 + self._eps
+        arr = self.jitarray
+
+        if index == 0:
+            x_xi, y_xi = self(x, dx=1), self(y, dx=1)
+            u_, v_ = self(u), self(v)
+            res0 = np.concatenate( [ arr(mul=(x_xi - u_)), arr(mul=(y_xi - v_)) ] )
+            mul0 = g22 * f(u)[0] - g12 * f(u)[1] - g12 * s(x)[1] + g11 * s(x)[2]
+            mul1 = g22 * f(v)[0] - g12 * f(v)[1] - g12 * s(y)[1] + g11 * s(y)[2]
+        else:
+            raise NotImplementedError
+        res1 = np.concatenate( [ arr(mul0 / scale), arr(mul1 / scale) ] )
+        return np.concatenate( [ res0, res1[self._g.dofindices] ] )
+
+    @mixed_FEM_BC
+    def jacobian( self, c: NamedArray ):
+
+        u, v, x, y = list(c)
+        f, s = self.fderivs, self.sderivs
+
+        g11, g12, g22 = self.metric( np.concatenate( [x, y] ) )
+
+        scale = g11 + g22 + self._eps
+        B = scale
+
+        index = self._coordinate_directions[0]
+        _M = self.jitmass
+
+        dindices = self.dindices
+
+        if index == 0:
+
+            if not hasattr( self, '_M_xi' ):
+                self._M_xi = _M( test='w', trial='x' )
+
+            M_xi = self._M_xi
+            M = self.M
+
+            dR0_dcx = sparse.block_diag( [M_xi] * 2 )
+            dR0_dcu = - sparse.block_diag( [M] * 2 )
+
+            dR1_dcu = sparse.block_diag( 
+                    [
+                        self.jitmass( mul=g22/scale, test='w', trial='x' )
+                        + self.jitmass( mul=-g12/scale, test='w', trial='y' )                        
+                    ] * 2 
+                 )
+
+            x_xi, x_eta = f(x)
+            y_xi, y_eta = f(y)
+
+            u_xi, u_eta = f(u)
+            v_xi, v_eta = f(v)
+
+            x_xi_eta, x_eta_eta = self( x, dx=1, dy=1 ), self( x, dy=2 )
+            y_xi_eta, y_eta_eta = self( y, dx=1, dy=1 ), self( y, dy=2 )
+
+            extra_term = _M(mul=-g12/B, trial='xy') + _M(mul=g11/B, trial='yy')
+
+            prefac0 = \
+                ( g22 * u_xi - g12 * u_eta - g12 * x_xi_eta + g11 * x_eta_eta )
+            prefac1 = \
+                ( g22 * v_xi - g12 * v_eta - g12 * y_xi_eta + g11 * y_eta_eta )
+
+            prefac0 /= scale ** 2
+            prefac1 /= scale ** 2
+
+            ################################
+
+            dR10_dcxx = \
+                _M(
+                    mul=(2*x_xi*(x_eta_eta/B - prefac0) - x_eta/B*(u_eta + x_xi_eta)),
+                    trial='x' ) + \
+                _M(
+                    mul=(2*x_eta*(u_xi/B - prefac0) - x_xi/B*(u_eta + x_xi_eta)),
+                    trial='y' ) + extra_term
+
+            dR11_dcxx = \
+                _M(
+                    mul=(2*x_xi*(y_eta_eta/B - prefac1) - x_eta/B*(v_eta + y_xi_eta)),
+                    trial='x' ) + \
+                + _M(
+                    mul=(2*x_eta*(v_xi/B - prefac1) - x_xi/B*(v_eta + y_xi_eta)),
+                    trial='y' )
+
+            dR1_dcxx = sparse.vstack( [ dR10_dcxx, dR11_dcxx ] )
+
+            ################################
+
+            dR10_dcxy = \
+                _M(
+                    mul=(2*y_xi*(x_eta_eta/B - prefac0) - y_eta/B*(u_eta + x_xi_eta)),
+                    trial='x' ) + \
+                _M(
+                    mul=(2*y_eta*(u_xi/B - prefac0) - y_xi/B*(u_eta + x_xi_eta)),
+                    trial='y' ) \
+
+            dR11_dcxy = \
+                _M(
+                    mul=(2*y_xi*(y_eta_eta/B - prefac1) - y_eta/B*(v_eta + y_xi_eta)),
+                    trial='x' ) + \
+                _M(
+                    mul=(2*y_eta*(v_xi/B - prefac1) - y_xi/B*(v_eta + y_xi_eta)),
+                    trial='y' ) + extra_term
+
+            dR1_dcxy = sparse.vstack( [ dR10_dcxy, dR11_dcxy ] )
+
+            dR1_dcx = sparse.hstack( [ dR1_dcxx, dR1_dcxy ] )
+
+        else:
+            raise NotImplementedError
+
+        return \
+            sparse.vstack([
+                sparse.hstack( [dR0_dcu, dR0_dcx] ),
+                sparse.hstack( [dR1_dcu, dR1_dcx] )
+                ]).tolil()[:, dindices][dindices, :].tocsc()
+
+    def init( self ):
+        x, y = np.array_split( self._g.x, 2 )
+        index = self._coordinate_directions[0]
+        return \
+            np.concatenate(
+                [ -self.project( self.fderivs(k)[index] ) for k in (x, y) ] +
+                [ self._g.x[self._g.dofindices] ]
+            )
+
     def solve( self, *args, print_feval=True, **kwargs ):
 
         feval = self._feval
 
         if 'init' not in kwargs:
-            x, y = np.array_split( self._g.x, 2 )
-            index = self._coordinate_directions[0]
-            init = \
-                np.concatenate(
-                    [ -self.project( self.fderivs(k)[index] ) for k in (x, y) ] +
-                    [ self._g.x[self._g.dofindices] ]
-                )
-            kwargs[ 'init' ] = init
+            kwargs[ 'init' ] = self.init()
 
         # add an empty dict ``jac_options`` if it doesn't already exist
         kwargs.setdefault( 'jac_options', {} )
@@ -1072,7 +1272,7 @@ class MixedFEM( FastSolver ):
 
 def fastsolve( g, method='Elliptic', ischeme=None, intargs=None, **solveargs ):
 
-    if len(g) != 2 or len(g.periodic) != 0:
+    if len(g) != 2:
         raise NotImplementedError
 
     if ischeme is None:

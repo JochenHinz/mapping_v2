@@ -33,7 +33,8 @@ else:
     del cyipopt
 
 
-def constraint( g, xi, eta, c ):
+def constraint( optimizer, xi, eta, c ):
+
     '''
         Return a vector of Jacobian Determinant
         function evaluations over the tensor-product
@@ -43,11 +44,13 @@ def constraint( g, xi, eta, c ):
         (hence not necessarily g.x).
     '''
 
+    g = optimizer._g
+
     assert len( g ) == g.targetspace == 2, NotImplementedError
 
     x, y = np.array_split( c, 2 )
 
-    _bsplev = lambda c, **kwargs: bsplev( xi, eta, g, c, **kwargs )
+    _bsplev = lambda c, **kwargs: bisplev( xi, eta, optimizer._tck(c), **kwargs ).ravel()
 
     x_xi = _bsplev( x, dx=1 )
     x_eta = _bsplev( x, dy=1 )
@@ -90,7 +93,7 @@ def assemble_sparse_times_dense( Dense, m, indices0, indices1, data ):
     return ret
 
 
-def constraint_jacobian( g, xi, eta, c, w_xi, w_eta ):
+def constraint_jacobian( optimizer, xi, eta, c, w_xi, w_eta ):
 
     '''
         Assemble the discrete constraint jacobian
@@ -101,6 +104,9 @@ def constraint_jacobian( g, xi, eta, c, w_xi, w_eta ):
         over all constraint abscissae of the first derivatives of all
         the basis functions (per row).
     '''
+
+    g = optimizer._g
+    
     assert len( g ) == g.targetspace == 2, NotImplementedError
 
     x, y = np.array_split( c, 2 )
@@ -108,7 +114,7 @@ def constraint_jacobian( g, xi, eta, c, w_xi, w_eta ):
     # XXX: this is a repetition from the ``jacobian`` function.
     # Find a more compact solution
 
-    _bsplev = lambda c_, **kwargs: bsplev( xi, eta, g, c_, **kwargs )
+    _bsplev = lambda c, **kwargs: bisplev( xi, eta, optimizer._tck(c), **kwargs ).ravel()
 
     x_xi = _bsplev( x, dx=1 )
     x_eta = _bsplev( x, dy=1 )
@@ -196,14 +202,13 @@ class ConstrainedMinimizer( FastSolver ):
                                                     for x_ in absc ), \
                 'Invalid constraint abscissae received.'
 
-            _bsplev = lambda x, **kwargs: sparse.csr_matrix(
-                bsplev( *self._absc, g, x, **kwargs )[:, None] )
+            _bsplev = lambda i, **kwargs: sparse.csr_matrix(
+                    self._splev( i, self._absc, **kwargs ).ravel()[:, None]
+            )
 
-            I = np.eye( len(g.basis) )
-
-            structure = sparse.hstack( [ _bsplev(i) for i in I ] )
-            self._w_xi = sparse.hstack( [ _bsplev(i, dx=1) for i in I ] )
-            self._w_eta = sparse.hstack( [ _bsplev(i, dy=1) for i in I ] )
+            structure = sparse.hstack( [ _bsplev(i) for i in range(self._N) ] )
+            self._w_xi = sparse.hstack( [ _bsplev(i, dx=1) for i in range(self._N) ] )
+            self._w_eta = sparse.hstack( [ _bsplev(i, dy=1) for i in range(self._N) ] )
 
             # sparsity structure of the constraint jacobian
             self.jacobianstructure = \
@@ -230,7 +235,7 @@ class ConstrainedMinimizer( FastSolver ):
             raise AssertionError('No constraints set.')
 
         log.info( 'Computing constraint ...' )
-        ret = constraint( g, *self._absc, c )
+        ret = constraint( self, *self._absc, c )
         log.info( 'Completed' )
 
         return ret
@@ -246,7 +251,7 @@ class ConstrainedMinimizer( FastSolver ):
         log.info( 'Computing constraint gradient ...' )
 
         ret = constraint_jacobian(
-            self._g, *self._absc, c, self._w_xi, self._w_eta )[:, d]
+            self, *self._absc, c, self._w_xi, self._w_eta )[:, d]
 
         log.info( 'Completed' )
 
