@@ -2,11 +2,8 @@
 # -*- coding: utf-8 -*-
 
 import numpy as np
-from mapping_2 import ko, go
-from nutils import function
-
 import abc
-
+from . import ko, go
 from numba import jit, njit, int64, float64, prange, types
 from functools import wraps, reduce, partial
 from scipy import interpolate, sparse, optimize
