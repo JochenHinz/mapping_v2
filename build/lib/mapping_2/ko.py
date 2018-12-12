@@ -118,7 +118,7 @@ class KnotObject:
             knots = knots[ : - p - 1 ]
             if self.knotmultiplicities[0] == p + 1:
                 periodic = False
-        grev = np.array( [ knots[i + 1: i + p + 1] for i in range(self.dim) ] ).sum(1) / p
+        grev = np.array( [ knots[ i + 1: i + p + 1 ] for i in range( self.dim ) ] ).sum( 1 ) / p
         return grev % 1 if periodic else grev
 
     def to_c(self, n):

@@ -4,7 +4,7 @@
 import numpy as np
 import abc
 from . import ko, go
-from numba import jit, njit, int64, float64, prange, types
+from numba import jit, njit, int64, float64, prange
 from functools import wraps, reduce, partial
 from scipy import interpolate, sparse, optimize
 from nutils import matrix, log
@@ -14,18 +14,18 @@ NUMBA_WARNINGS = 1
 NUMBA_DEBUG_ARRAY_OPT_STATS = 1
 
 
-'''
+"""
     XXX: O-grid functionality added. Implement the jacobians
     for all methods.
-'''
+"""
 
 
 def blockshaped( arr, nrows, ncols ):
     """
-    Array ``arr`` of shape ( h, w ) becomes of shape
-    ( -1, nrows, ncols ), where arr_reshaped[i] contains the entries of
-    the i-th ( h // nrows, w // ncols ) block (going from left to right,
-    top to bottom) in ``arr``.
+        Array ``arr`` of shape ( h, w ) becomes of shape
+        ( -1, nrows, ncols ), where arr_reshaped[i] contains the entries of
+        the i-th ( h // nrows, w // ncols ) block (going from left to right,
+        top to bottom) in ``arr``.
     """
     h, w = arr.shape
     return arr.reshape(h // nrows, nrows, -1, ncols) \
@@ -138,9 +138,13 @@ def tensor_neighbours( *neighbours ):
 
     M = reduce( sparse.kron, mats ) if len( mats ) > 1 else mat
 
-    # for some reason M.rows() gives the wrong number of nonzeros
-    # however, M.nonzero() works fine.
-    # possibly write some jit-compiled functionality for this in the long run
+    '''
+        for some reason M.rows() gives the wrong number of nonzeros
+        however, M.nonzero() works fine.
+        possibly write some jit-compiled functionality for this in
+        the long run.
+    '''
+
     rows = [ [] for i in range(M.shape[0]) ]
     for i, j in zip( *M.nonzero() ):
         rows[i].append(j)
@@ -210,26 +214,28 @@ def intersection( arr1, arr2 ):
         int64[:]
     ),
     parallel=True,
-    nogil=True
+    nogil=True,
+    fastmath=True
 )
 def jitarray( N, ws, quadweights, elemstart, elems ):
-    """ Compute a jitted array
+    """
+        Compute a jitted array
 
-    Parameters
-    ----------
-    N: length of the array
-    ws: function evaluations (W's) in blockshape-format (see below)
-    quadweights: element-wise quadrature weights in blockshape-format
-    elemstart: global indices of the elements that contribute to the
-        i-th entry are given by elemstart[i]: elemstart[i + 1]
-    elems: sorted list of element indices, where
-        elems[ elemstart[i]: elemstart[i + 1] ][k] gives the global
-        index of the k local element corresponding to the i-th basis
-        function.
+        Parameters
+        ----------
+        N: length of the array
+        ws: function evaluations (W's) in blockshape-format (see below)
+        quadweights: element-wise quadrature weights in blockshape-format
+        elemstart: global indices of the elements that contribute to the
+            i-th entry are given by elemstart[i]: elemstart[i + 1]
+        elems: sorted list of element indices, where
+            elems[ elemstart[i]: elemstart[i + 1] ][k] gives the global
+            index of the k local element corresponding to the i-th basis
+            function.
 
-    Returns
-    -------
-    np.ndarray
+        Returns
+        -------
+        np.ndarray
 
     """
     ret = np.zeros( N, dtype=np.float64 )
@@ -237,7 +243,9 @@ def jitarray( N, ws, quadweights, elemstart, elems ):
         """ compute i-th entry """
         start = elemstart[i]
         local_to_global_elements = elems[ start: elemstart[i + 1] ]
-        for k in range( len(local_to_global_elements) ):
+        n = len( local_to_global_elements )
+        sums = np.empty(n)
+        for k in prange(n):
             """
                 Loop over all elements that contribute to the i-th entry.
                 They are given by the ascending list of element support
@@ -253,7 +261,8 @@ def jitarray( N, ws, quadweights, elemstart, elems ):
             # to local element index k.
             # This is simply given by local_to_global_elements[ k ].
             w = quadweights[ local_to_global_elements[k] ]
-            ret[i] += ( ws[elem] * w ).sum()
+            sums[k] = ( ws[elem] * w ).sum()
+        ret[i] = sums.sum()
     return ret
 
 
@@ -270,36 +279,37 @@ def jitarray( N, ws, quadweights, elemstart, elems ):
         int64[:]
     ),
     nogil=True,
-    parallel=True
+    parallel=True,
+    fastmath=True
 )
 def jitmass( N, m, ws0, ws1, quadweights, elemstart, elems, lilstart, lils ):
     """
-    Compute a jitted mass-matrix-like array.
-    Here, mass-matrix-like refers to matrices with the same sparsity-pattern.
+        Compute a jitted mass-matrix-like array.
+        Here, mass-matrix-like refers to matrices with the same sparsity-pattern.
 
-    Parameters
-    ----------
-    N: dimension of the jitted matrix
-    m: dimension of the spline-basis in the eta-direction
-    ws0: test space in blockshape-format
-    ws1: trial space in blockshape-format
-    quadweights: quadrature weights in blockshape-format
-    elemstart: global indices of the elements that contribute to the
-        i-th entry are given by elemstart[i]: elemstart[i + 1]
-    elems: sorted list of element indices, where
-        elems[ elemstart[i]: elemstart[i + 1] ][k] gives the global
-        index of the k-th local element corresponding to the i-th basis
-        function.
-    lilstart: see below
-    lils: the nonzero entries in the i-th row of the matrix correspond to
-        lils[ lilstart[i]: lilstart[i+1] ]
+        Parameters
+        ----------
+        N: dimension of the jitted matrix
+        m: dimension of the spline-basis in the eta-direction
+        ws0: test space in blockshape-format
+        ws1: trial space in blockshape-format
+        quadweights: quadrature weights in blockshape-format
+        elemstart: global indices of the elements that contribute to the
+            i-th entry are given by elemstart[i]: elemstart[i + 1]
+        elems: sorted list of element indices, where
+            elems[ elemstart[i]: elemstart[i + 1] ][k] gives the global
+            index of the k-th local element corresponding to the i-th basis
+            function.
+        lilstart: see below
+        lils: the nonzero entries in the i-th row of the matrix correspond to
+            lils[ lilstart[i]: lilstart[i+1] ]
 
-    Returns
-    -------
+        Returns
+        -------
 
-    np.ndarray
-        suitable for the construction of a matrix in
-        scipy.sparse.lil_matrix-format
+        np.ndarray
+            suitable for the construction of a matrix in
+            scipy.sparse.lil_matrix-format
 
     """
     ret = np.zeros( len(lils), dtype=np.float64 )
@@ -327,7 +337,7 @@ def jitmass( N, m, ws0, ws1, quadweights, elemstart, elems, lilstart, lils ):
 class HashAbleArray( np.ndarray ):
 
     """
-    Hashable array for use in ``cache``
+        Hashable array for use in ``cache``.
     """
 
     def __new__( cls, data ):
@@ -352,7 +362,7 @@ class InstanceMethodCache:
     def __get__( self, obj, objtype=None ):
         if obj is None:
             return self._func
-        return partial( self._func, obj )
+        return partial( self, obj )
 
     def __call__( self, *args, **kwargs ):
         obj, c, *args = args
@@ -409,9 +419,7 @@ class SecondOrderKrylovJacobian( optimize.nonlin.KrylovJacobian ):
         return r
 
 
-def root( I, init=None, order=1, jac_options=None, **scipyargs ):
-
-    assert order in ( 1, 2 )
+def root( I, init=None, jacobian=1, jac_options=None, **scipyargs ):
 
     scipyargs.setdefault( 'verbose', True )
     scipyargs.setdefault( 'maxiter', 50 )
@@ -424,10 +432,12 @@ def root( I, init=None, order=1, jac_options=None, **scipyargs ):
     if jac_options is None:
         jac_options = {}
 
-    if order == 1:
+    if jacobian == 1:
         jac = optimize.nonlin.KrylovJacobian( **jac_options )
-    else:
+    elif jacobian == 2:
         jac = SecondOrderKrylovJacobian( **jac_options )
+    else:
+        jac = jacobian( **jac_options )
 
     log.info( 'solving system with maxiter={}'.format( scipyargs['maxiter'] ) )
 
@@ -528,7 +538,7 @@ class FastSolver( abc.ABC ):
                 for i in range(self._N) )
             )
 
-        return np.concatenate( list( values ) )
+        return np.concatenate( list(values) )
 
     def _set_LoL( self ):
 
@@ -617,14 +627,14 @@ class FastSolver( abc.ABC ):
 
     def __getitem__( self, key ):
 
-        """
-            Return blockshaped function evaluations (for test and trial spaces)
-        """
+        '''
+            Return blockshaped function evaluations (for test and trial spaces).
+        '''
         try:
             ret = self._w[key]
         except KeyError:
             ret = self._w_eval(key)
-            log.info( key + ' has been tabularized.' )
+            log.info( key + ' has been tabulated.' )
             self._w[key] = ret
         except Exception as ex:
             raise Exception( 'Failed with unknown exception {}.'.format(ex) )
@@ -633,10 +643,10 @@ class FastSolver( abc.ABC ):
 
     def __call__( self, c, **kwargs ):
 
-        """
+        '''
             Call is overloaded to simply yield the mapping evaluated in c
-            (or its derivatives)
-        """
+            (or its derivatives).
+        '''
 
         return interpolate.bisplev( *self._quad, self._tck(c), **kwargs )
 
@@ -644,12 +654,12 @@ class FastSolver( abc.ABC ):
 
     @InstanceMethodCache
     def zderivs( self, c ):
-        """ zeroth order derivative """
+        ''' zeroth order derivative '''
         return self( c )
 
     @InstanceMethodCache
     def fderivs( self, c ):
-        """ first derivatives """
+        ''' first derivatives '''
         return [ self( c, dx=1 ), self( c, dy=1 ) ]
 
     @InstanceMethodCache
@@ -659,13 +669,13 @@ class FastSolver( abc.ABC ):
 
     @InstanceMethodCache
     def sderivs( self, c ):
-        """ second derivatives """
+        ''' second derivatives '''
         kwargs = ( { 'dx': 2 }, { 'dx': 1, 'dy': 1 }, { 'dy': 2 } )
         return [ self( c, **k ) for k in kwargs ]
 
     @InstanceMethodCache
     def metric( self, c ):
-        """ [ g11, g12, g22 ] """
+        ''' [ g11, g12, g22 ] '''
         cs = np.array_split( c, 2 )
         (x_xi, x_eta), (y_xi, y_eta) = [ self.fderivs(c_) for c_ in cs ]
         return \
@@ -795,10 +805,85 @@ class Elliptic( FastSolver ):
             + self._rhs
 
 
-class EllipticControl( Elliptic ):
+class Elliptic_partial( FastSolver ):
+
+    @with_boundary_conditions
+    def residual( self, c ):
+
+        arr = self.jitarray
+
+        jacdet = clip_from_zero( self.jacdet(c) )
+        g11, g12, g22 = self.metric(c)
+
+        ret = \
+            np.concatenate([
+                arr( g22 / jacdet, 'x' ) - arr( g12 / jacdet, 'y' ),
+                -arr( g12 / jacdet, 'x' ) + arr( g11 / jacdet, 'y' )
+            ])
+
+        return ret
+
+
+class EllipticControl( Elliptic, abc.ABC ):
+
+    @abc.abstractmethod
+    def _tablulate_control_mapping( self ):
+        pass
+
+    def __init__( self, g, order, f=None, **kwargs ):
+        if order < 6:
+            log.warning(
+                '''
+                    Warning, for this method a Gauss-scheme of at least
+                    order 6 is recommended.
+                '''
+            )
+        super().__init__( g, order, **kwargs )
+
+        if isinstance( f, go.TensorGridObject ):
+
+            if len( f ) != 2:
+                raise NotImplementedError
+
+            if not ( f.knotvector <= g.knotvector ).all():
+                log.warning(
+                    '''
+                        Warning, using a control mapping whose knotvector is
+                        not a subset of the target GridObject knotvector
+                        or that does not have the same periodicity properties
+                        is not recommended, since Gaussian quadrature is
+                        ill-defined in this case.
+                    '''
+                )
+
+            if any( (p in km) for p, km in zip( f.degree, f.knotmultiplicities ) ):
+                log.warning(
+                    '''
+                        Warning, f contains C^0-continuities, however, strictly
+                        speaking, the control mapping needs to be at least
+                        C^1-continuous. Consider using f.to_c([1, 1]) instead.
+                    '''
+                )
+
+            self._f = f.toscipy()
+
+        else:
+            '''
+                So far, we only allow for instantiations of the class
+                ``go.TensorGridObject`` as control mapping.
+                XXX: allow for other means of instantiation, for instance
+                via a list / dictionary implementing functions for the
+                control mapping and all its relevant derivatives.
+            '''
+            raise NotImplementedError
+
+        self._tablulate_control_mapping()
+
+
+class EllipticPhysicalControl( EllipticControl ):
 
     """
-        Elliptic Grid Generation with control mapping.
+        Elliptic Grid Generation with physical (not parametric) control mapping.
         Based on the article `Generation of Structured Difference
         Grids in Two-Dimensional Nonconvex Domains Using Mappings`.
     """
@@ -829,7 +914,7 @@ class EllipticControl( Elliptic ):
 
         # Jacobian determinant and its derivatives
         jacdet = X_xi[_0] * X_eta[_1] - X_eta[_0] * X_xi[_1]
-        jacsqrt = jacdet ** 2
+        jacsq = jacdet ** 2
         jacdet_xi = X_xi_xi[_0] * X_eta[_1] + X_xi[_0] * X_xi_eta[_1] \
             - X_xi_eta[_0] * X_xi[_1] - X_eta[_0] * X_xi_xi[_1]
         jacdet_eta = X_xi_eta[_0] * X_eta[_1] + X_xi[_0] * X_eta_eta[_1] \
@@ -852,26 +937,26 @@ class EllipticControl( Elliptic ):
         # derivatives of _G11
         self._G11_xi = \
             2 * ( X_xi * X_xi_xi ).sum(-1) / jacdet \
-            - jacdet_xi * (X_xi ** 2).sum(-1) / jacsqrt
+            - jacdet_xi * (X_xi ** 2).sum(-1) / jacsq
         self._G11_eta = \
             2 * ( X_xi * X_xi_eta ).sum(-1) / jacdet \
-            - jacdet_eta * (X_xi ** 2).sum(-1) / jacsqrt
+            - jacdet_eta * (X_xi ** 2).sum(-1) / jacsq
 
         # derivatives of _G12
         self._G12_xi = \
             (X_xi_xi * X_eta + X_xi * X_xi_eta).sum(-1) / jacdet  \
-            - jacdet_xi * (X_xi * X_eta).sum(-1) / jacsqrt
+            - jacdet_xi * (X_xi * X_eta).sum(-1) / jacsq
         self._G12_eta = \
             (X_xi_eta * X_eta + X_xi * X_eta_eta).sum(-1) / jacdet \
-            - jacdet_eta * (X_xi * X_eta).sum(-1) / jacsqrt
+            - jacdet_eta * (X_xi * X_eta).sum(-1) / jacsq
 
         # derivatives of _G22
         self._G22_xi = \
             2 * ( X_eta * X_xi_eta ).sum(-1) / jacdet \
-            - jacdet_xi * (X_eta ** 2).sum(-1) / jacsqrt
+            - jacdet_xi * (X_eta ** 2).sum(-1) / jacsq
         self._G22_eta = \
             2 * ( X_eta * X_eta_eta ).sum(-1) / jacdet \
-            - jacdet_eta * (X_eta ** 2).sum(-1) / jacsqrt
+            - jacdet_eta * (X_eta ** 2).sum(-1) / jacsq
 
         log.info( 'The control mapping has been tabulated.' )
 
@@ -887,47 +972,7 @@ class EllipticControl( Elliptic ):
             log.info( 'No control mapping passed, proceeding with standard EGG' )
             return Elliptic( g, order, **kwargs )
 
-        return super( EllipticControl, cls ).__new__(cls)
-
-    def __init__( self, g, order, f=None, **kwargs ):
-        if order < 6:
-            log.warning(
-                '''
-                    Warning, for this method a Gauss-scheme of at least
-                    order 6 is recommended.
-                '''
-            )
-        super().__init__( g, order, **kwargs )
-
-        if isinstance( f, go.TensorGridObject ):
-
-            if len( f ) != 2:
-                raise NotImplementedError
-
-            if not ( f.knotvector <= g.knotvector ).all():
-                log.warning(
-                    '''
-                        Warning, using a control mapping whose knotvector is
-                        not a subset of the target GridObject knotvector
-                        or that does not have the same periodicity properties
-                        is not recommended, since Gaussian quadrature is
-                        ill-defined in this case.
-                    '''
-                )
-
-            self._f = f.toscipy()
-
-        else:
-            '''
-                So far, we only allow for instantiations of the class
-                ``go.TensorGridObject`` as control mapping.
-                XXX: allow for other means of instantiation, for instance
-                via a list / dictionary implementing functions for the
-                control mapping and all its relevant derivatives.
-            '''
-            raise NotImplementedError
-
-        self._tablulate_control_mapping()
+        return Elliptic.__new__(cls)
 
     @with_boundary_conditions
     def residual( self, c ):
@@ -962,23 +1007,104 @@ class EllipticControl( Elliptic ):
             + self._rhs
 
 
-class Elliptic_partial( FastSolver ):
+class EllipticParametricControl( EllipticControl ):
+
+    '''
+        Elliptic Grid Generator with parametric control mapping.
+        Based on the fourth chapter from the Handbook of Grid Generation.
+    '''
+
+    def _tablulate_control_mapping( self ):
+
+        '''
+            Tabulate the control mapping and all its required derivatives
+            in the quadrature points.
+            XXX: see if we can make this look prettier
+                (possibly using some symbolic approach).
+        '''
+
+        # by the time this is called, _f and _quad have been set
+        # in the __init__ method
+        _f = self._f
+        _q = self._quad
+
+        _0 = ( Ellipsis, 0 )
+        _1 = ( Ellipsis, 1 )
+
+        T_xi = _f( *_q, dx=1 )
+        s_xi, t_xi = T_xi[_0], T_xi[_1]
+
+        T_eta = _f( *_q, dy=1 )
+        s_eta, t_eta = T_eta[_0], T_eta[_1]
+
+        T_xi_xi = _f( *_q, dx=2 )
+        s_xi_xi, t_xi_xi = T_xi_xi[_0], T_xi_xi[_1]
+
+        T_xi_eta = _f( *_q, dx=1, dy=1 )
+        s_xi_eta, t_xi_eta = T_xi_eta[_0], T_xi_eta[_1]
+
+        T_eta_eta = _f( *_q, dy=2 )
+        s_eta_eta, t_eta_eta = T_eta_eta[_0], T_eta_eta[_1]
+
+        jacdet = s_xi * t_eta - s_eta * t_xi
+
+        self._P11 = \
+            [
+                -1/jacdet * (t_eta * s_xi_xi - s_eta * t_xi_xi),
+                -1/jacdet * (-t_xi * s_xi_xi + s_xi * t_xi_xi)
+            ]
+        self._P12 = \
+            [
+                -1/jacdet * (t_eta * s_xi_eta - s_eta * t_xi_eta),
+                -1/jacdet * (-t_xi * s_xi_eta + s_xi * t_xi_eta)
+            ]
+        self._P22 = \
+            [
+                -1/jacdet * (t_eta * s_eta_eta - s_eta * t_eta_eta),
+                -1/jacdet * (-t_xi * s_eta_eta + s_xi * t_eta_eta)
+            ]
+
+        if not ( jacdet > 0 ).all():
+            log.warning(
+                '''
+                    Warning, the control mapping is defective on at
+                    least one quadrature point. Proceeding with this
+                    control mapping may lead to failure of convergence
+                    and / or a defective mapping.
+                '''
+            )
+
+        log.info( 'The control mapping has been tabulated.' )
 
     @with_boundary_conditions
     def residual( self, c ):
 
-        arr = self.jitarray
+        cs = np.array_split( c, 2 )
 
-        jacdet = clip_from_zero( self.jacdet(c) )
+        P11 = self._P11
+        P12 = self._P12
+        P22 = self._P22
+
         g11, g12, g22 = self.metric(c)
+        dx, dy = [ self.fderivs(c_) for c_ in cs ]
+        ddx, ddy = [ self.sderivs(c_) for c_ in cs ]
 
-        ret = \
+        mul0 = g22 * ddx[0] - 2 * g12 * ddx[1] + g11 * ddx[2]
+        mul1 = g22 * ddy[0] - 2 * g12 * ddy[1] + g11 * ddy[2]
+
+        S = g22 * P11[0] - 2 * g12 * P12[0] + g11 * P22[0]
+        T = g22 * P11[1] - 2 * g12 * P12[1] + g11 * P22[1]
+
+        mul0 += S * dx[0] + T * dx[1]
+        mul1 += S * dy[0] + T * dy[1]
+
+        scale = g11 + g22 + self._eps
+
+        return \
             np.concatenate([
-                arr( g22 / jacdet, 'x' ) - arr( g12 / jacdet, 'y' ),
-                -arr( g12 / jacdet, 'x' ) + arr( g11 / jacdet, 'y' )
+                self.jitarray(mul=mul0/scale),
+                self.jitarray(mul=mul1/scale)
             ])
-
-        return ret
 
 
 class NamedArray( np.ndarray ):
@@ -1038,18 +1164,45 @@ def mixed_FEM_BC( f ):
     return wrapper
 
 
+def c0( g ):
+
+    '''
+        Return the coordinate directions that contain
+        C^0-continuities.
+    '''
+
+    return tuple( i for i in range(2)
+            if g.degree[i] in g.knotmultiplicities[i] )
+
+
+def to_named_array( f ):
+
+    '''
+        If the second argument (the one next to self)
+        is not an instance of ``NamedArray``, turn it
+        into an instance of ``NamedArray``.
+    '''
+
+    @wraps(f)
+    def wrapper( self, c, *args, **kwargs ):
+        if not isinstance( c, NamedArray ):
+            c = NamedArray(c)
+        return f( self, c, *args, **kwargs )
+
+    return wrapper
+
+
 class MixedFEM( FastSolver ):
 
-    def __init__( self, *args, eps=0.001, coordinate_directions=None, **kwargs ):
+    def __init__(
+                    self,
+                    *args,
+                    eps=0.001,
+                    **kwargs ):
 
         g, *args = args
 
-        def c0( g ):
-            return tuple( i for i in range(2)
-                    if g.degree[i] in g.knotmultiplicities[i] )
-
-        if coordinate_directions is None:
-            coordinate_directions = c0( g )
+        coordinate_directions = c0(g)
 
         assert len( coordinate_directions ) in (1, 2) and \
             all( i in (0, 1) for i in coordinate_directions )
@@ -1059,28 +1212,51 @@ class MixedFEM( FastSolver ):
 
         super().__init__( g, *args, **kwargs )
 
-        self._coordinate_directions = coordinate_directions
-        self._M_inv = sparse.linalg.splu( self.M.tocsc() )
         self._eps = eps
+        self._coordinate_directions = coordinate_directions
+        self._feval = 0
 
     @property
     def dindices( self ):
         if not hasattr( self, '_dindices' ):
             N = self._N
             self._dindices = \
-                np.concatenate( [np.arange(2 * N), self._g.dofindices + 2 * N] )
+                np.concatenate( [np.arange(2 * N),
+                                self._g.dofindices + 2 * N] )
         return self._dindices
 
-    @mixed_FEM_BC
-    def residual( self, c: NamedArray ):
+    @property
+    def M_x( self ):
+        if not hasattr( self, '_M_x' ):
+            trial = { 0: 'x', 1: 'y' }[ self._coordinate_directions[0] ]
+            self._M_x = self.jitmass( test='w', trial=trial )
+        return self._M_x
 
-        '''
-            Residual for Newton-Krylov.
-            The first two block-entries are scaled by the inverse of the mass
-            matrix for better convergence.
-        '''
+    @property
+    def M_inv( self ):
+        if not hasattr( self, '_M_inv' ):
+            self._M_inv = sparse.linalg.splu( self.M.tocsc() )
+        return self._M_inv
+
+    @to_named_array
+    def linear_residual( self, c: NamedArray ):
 
         u, v, x, y = list(c)
+
+        M_x = self.M_x
+        M = self.M
+        return \
+            np.concatenate([
+                M.dot(n) - M_x.dot(m) for n, m in zip([u, v], [x, y])
+            ])
+
+    @to_named_array
+    def nonlinear_residual( self, c: NamedArray ):
+
+        self._feval += 1
+
+        u, v, x, y = list(c)
+
         f, s = self.fderivs, self.sderivs
         g11, g12, g22 = self.metric( np.concatenate( [x, y] ) )
 
@@ -1089,9 +1265,6 @@ class MixedFEM( FastSolver ):
 
         scale = g11 + g22 + self._eps
         arr = self.jitarray
-
-        proj = lambda n, m: n - self._M_inv.solve( arr( self.fderivs(m)[index] ) )
-        res0 = np.concatenate( [ proj(n, m) for n, m in zip( [u, v], [x, y] ) ] )
 
         if index == 0:
             mul0 = g22 * f(u)[0] - g12 * f(u)[1] - g12 * s(x)[1] + g11 * s(x)[2]
@@ -1100,37 +1273,48 @@ class MixedFEM( FastSolver ):
             mul0 = g22 * s(x)[0] - g12 * f(u)[0] - g12 * s(x)[1] + g11 * f(u)[1]
             mul1 = g22 * s(y)[0] - g12 * f(v)[0] - g12 * s(y)[1] + g11 * f(v)[1]
 
-        res1 = np.concatenate( [ arr(mul0 / scale), arr(mul1 / scale) ] )
-        return np.concatenate( [ -res0, res1[self._g.dofindices] ] )
+        return np.concatenate( [ arr(mul0 / scale), arr(mul1 / scale) ] )
+
+    @mixed_FEM_BC
+    def residual( self, c: NamedArray ):
+
+        '''
+            Residual for Newton-Krylov.
+            The first two block-entries are scaled by the inverse
+            of the mass matrix for better convergence.
+        '''
+
+        u, v, x, y = list(c)
+        f = self.fderivs
+
+        arr = self.jitarray
+        index = self._coordinate_directions[0]
+
+        proj = lambda n, m: n - self.M_inv.solve( arr( f(m)[index] ) )
+        res0 = np.concatenate([ proj(n, m) for n, m in zip( [u, v], [x, y] ) ])
+
+        res1 = self.nonlinear_residual(c)
+        return np.concatenate([ res0, res1[self._g.dofindices] ])
 
     @mixed_FEM_BC
     def jacresidual( self, c: NamedArray ):
-        u, v, x, y = list(c)
-        f, s = self.fderivs, self.sderivs
-        g11, g12, g22 = self.metric( np.concatenate( [x, y] ) )
 
-        # index in (0, 1) for now, index == (0, 1) is not supported yet
-        index = self._coordinate_directions[0]
+        '''
+            Residual for a matrix-based Newton-approach.
+            The difference to ``self.residual`` is that
+            the linear part of the residual is not preconditioned
+            with the mass inverse of the mass matrix.
+        '''
 
-        scale = g11 + g22 + self._eps
-        arr = self.jitarray
-
-        if index == 0:
-            x_xi, y_xi = self(x, dx=1), self(y, dx=1)
-            u_, v_ = self(u), self(v)
-            res0 = np.concatenate( [ arr(mul=(x_xi - u_)), arr(mul=(y_xi - v_)) ] )
-            mul0 = g22 * f(u)[0] - g12 * f(u)[1] - g12 * s(x)[1] + g11 * s(x)[2]
-            mul1 = g22 * f(v)[0] - g12 * f(v)[1] - g12 * s(y)[1] + g11 * s(y)[2]
-        else:
-            raise NotImplementedError
-        res1 = np.concatenate( [ arr(mul0 / scale), arr(mul1 / scale) ] )
-        return np.concatenate( [ res0, res1[self._g.dofindices] ] )
+        res0 = self.linear_residual(c)
+        res1 = self.nonlinear_residual(c)
+        return np.concatenate( [ res0, res1 ] )[ self.dindices ]
 
     @mixed_FEM_BC
     def jacobian( self, c: NamedArray ):
 
         u, v, x, y = list(c)
-        f, s = self.fderivs, self.sderivs
+        f = self.fderivs
 
         g11, g12, g22 = self.metric( np.concatenate( [x, y] ) )
 
@@ -1144,21 +1328,18 @@ class MixedFEM( FastSolver ):
 
         if index == 0:
 
-            if not hasattr( self, '_M_xi' ):
-                self._M_xi = _M( test='w', trial='x' )
-
-            M_xi = self._M_xi
+            M_xi = self.M_x
             M = self.M
 
             dR0_dcx = sparse.block_diag( [M_xi] * 2 )
             dR0_dcu = - sparse.block_diag( [M] * 2 )
 
-            dR1_dcu = sparse.block_diag( 
-                    [
-                        self.jitmass( mul=g22/scale, test='w', trial='x' )
-                        + self.jitmass( mul=-g12/scale, test='w', trial='y' )                        
-                    ] * 2 
-                 )
+            dR1_dcu = sparse.block_diag(
+                [
+                    self.jitmass( mul=g22/scale, test='w', trial='x' ) +
+                    self.jitmass( mul=-g12/scale, test='w', trial='y' )
+                ] * 2
+            )
 
             x_xi, x_eta = f(x)
             y_xi, y_eta = f(y)
@@ -1193,7 +1374,7 @@ class MixedFEM( FastSolver ):
                 _M(
                     mul=(2*x_xi*(y_eta_eta/B - prefac1) - x_eta/B*(v_eta + y_xi_eta)),
                     trial='x' ) + \
-                + _M(
+                _M(
                     mul=(2*x_eta*(v_xi/B - prefac1) - x_xi/B*(v_eta + y_xi_eta)),
                     trial='y' )
 
@@ -1224,24 +1405,26 @@ class MixedFEM( FastSolver ):
         else:
             raise NotImplementedError
 
+        # minus in front of the linear part to be compatible with self.jacresidual
         return \
             sparse.vstack([
-                sparse.hstack( [dR0_dcu, dR0_dcx] ),
+                sparse.hstack( [-dR0_dcu, -dR0_dcx] ),
                 sparse.hstack( [dR1_dcu, dR1_dcx] )
-                ]).tolil()[:, dindices][dindices, :].tocsc()
+            ]).tolil()[:, dindices][dindices, :].tocsc() # ugly, find better solution.
 
     def init( self ):
+        '''
+            Generate the canonical initial guess.
+        '''
         x, y = np.array_split( self._g.x, 2 )
         index = self._coordinate_directions[0]
         return \
             np.concatenate(
-                [ -self.project( self.fderivs(k)[index] ) for k in (x, y) ] +
+                [ self.project( self.fderivs(k)[index] ) for k in (x, y) ] +
                 [ self._g.x[self._g.dofindices] ]
             )
 
-    def solve( self, *args, print_feval=True, **kwargs ):
-
-        feval = self._feval
+    def solve( self, jacobian='Schur', **kwargs ):
 
         if 'init' not in kwargs:
             kwargs[ 'init' ] = self.init()
@@ -1252,19 +1435,313 @@ class MixedFEM( FastSolver ):
         # this value is chosen heuristically
         kwargs['jac_options'].setdefault( 'inner_atol', 1e-12 )
 
-        ret = root( self, *args, **kwargs )
+        if jacobian in ('Schur', 'schur'):
+            kwargs[ 'jacobian' ] = MixedFEMSchurKrylovJacobian
+            kwargs['jac_options'][ 'solver' ]= self
+            # overwrite the residual
+            self.residual = self.jacresidual
 
-        if print_feval:
-            feval = self._feval - feval
-            entries_computed = 2 * feval * self._N
-            entries_jacobian = 8 * self.M.nnz
-            log.info( 'Reached convergence after {} function evaluations.'
-                    .format( feval ) )
-            log.info( 'This corresponds to {} evaluations of the Jacobian.'
-                    .format( entries_computed / entries_jacobian ) )
+        ret = root( self, **kwargs )
+
+        log.info( 'Converged after {} function evaluations.'
+                .format( self._feval ) )
 
         # discard the auxilliary variables from the solution
         return ret[ -len(self._g.dofindices): ]
+
+
+class MixedFEMSchurKrylovJacobian( optimize.nonlin.KrylovJacobian ):
+
+    '''
+        KrylovJacobian that is capable of solving problems
+        of the ``MixedFEM`` type. At each Newton-iteration,
+        the system of equations
+
+                        | A, B | |du| = |a|
+                        | C, D | |dx| = |b|,
+
+        where the matrices A and B correspond to the linear part
+        of the MixedFEM-problem, is reduced to a Schur-complement
+        type problem with the goal of only computing |dx|:
+
+                (D - C A_inv B) * |dx| = |b| - C A_inv |a|.   (1)
+
+        (1) is approximately solved using a Newton-Krylov approach,
+        where D * |dx| and C * ( A_inv B |dx| ) are approximated
+        by first order finite-differences on the nonlinear part of
+        the residual function. Here, A and B are separable mass-matrix-like
+        matrices that are assembled explicitly.
+        Upon completion, |du| is computed by solving
+
+                    |du| = A_inv * (|a| - B * |dx|),
+
+        after which a line-search procedure estimates the optimal value of
+        eps such that ( |u| + eps * |du|, |x| + eps * |dx| )^T minimizes
+        the residual norm over eps in (0, 1].
+
+        The advantage with respect to running Newton-Krylov on the full matrix
+        rather than the Schur-complement is that (1) is a better-scaled
+        problem in which finite-differences tend to work better and
+        convergence is reached in fewer iterations.
+        Both versions don't require the assmebly of the nonlinear parts
+        of the Jacobian, C and D.
+
+        XXX: A and B are not assembled from a kronecker-product of their
+             univariate constituents. Change this in the long run.
+        XXX: A is inverted by computing a sparse LU-factorization, not
+             taking advantage of its separable nature. And implementation
+             that utilizes univariate LU- (or Cholesky-) factorizations
+             of the constituents of A should speed things up even further.
+        XXX: Add support for MixedFEM in both directions.
+    '''
+
+    def __init__( self, solver: MixedFEM, **kwargs ):
+
+        self._solver = solver
+        self._g = solver._g
+
+        self.M_inv = solver.M_inv
+        self.M_x = \
+            sparse.block_diag(
+                [solver.M_x]*2
+            ).tolil()[:, self._g.dofindices].tocsc()
+
+        self._Nlinear = 2 * solver._N
+        self._Nnonlinear = len( self._g.dofindices )
+        self._n = self._Nlinear + self._Nnonlinear
+
+        super().__init__( **kwargs )
+
+    def add_bc( self, c ):
+
+        '''
+            Add the boundary condition to the nonlinear
+            part of the vector of unknowns.
+        '''
+
+        v = self._g.cons.copy()
+        v[ self._g.dofindices ] = c
+        return v
+
+    def add_bc_full( self, c ):
+
+        '''
+            Add the boundary condition to the full vector
+            of unknowns. Note that the linear part of the
+            vector of unknowns is generally unaltered by this
+            operations since it is not subject to boundary conditions.
+        '''
+
+        u_, x_ = self.split(c)
+        return np.concatenate([ u_, self.add_bc(x_) ])
+
+    def Bvec( self, c ):
+        return -self.M_x.dot(c)
+
+    def collapse_rhs( self, rhs ):
+
+        '''
+            Turn a vector of the form ( |a|, |b| )^T into
+            |b| - C A_inv |a|.
+            Here, C |x| is approximated through finite-differences.
+        '''
+
+        a, b = self.split( rhs )
+        return \
+            - self.Cvec(
+                np.concatenate([
+                    self.M_inv.solve(i) for i in np.array_split(a, 2)
+                ]),
+                deriv='u'
+            ) + b
+
+    def split( self, c ):
+
+        '''
+            Split a the vector ``c`` into
+            parts correponding to auxilliary and main variables.
+        '''
+
+        N = self._Nlinear
+        return c[ :N ], c[ N: ]
+
+    def Cvec( self, x, sc=None, deriv='u' ):
+
+        '''
+            Return an approximation of C * |x|
+            or D * |x|, where deriv='u' refers to
+            C and deriv='x' to D.
+        '''
+
+        assert deriv in ( 'u', 'x' )
+
+        if sc is None:
+            sc = self.omega / np.linalg.norm(x)
+
+        f = self._solver.nonlinear_residual
+
+        X0 = self.add_bc_full( self.x0 )
+
+        if deriv == 'u':
+            n = len(X0) - len(x)
+            X = np.concatenate( [ x, np.zeros(n) ] )
+        else:
+            X = np.zeros_like( X0 )
+            X[ self._Nlinear + self._g.dofindices ] = x
+
+        X = X0 + sc * X
+
+        return \
+            (f(X)[self._g.dofindices] - self.f0[-self._Nnonlinear:]) / sc
+
+    def matvec( self, v ):
+
+        '''
+            Return an approximation of (D C A_inv B) * |v|.
+        '''
+
+        M_inv = self.M_inv
+
+        Bv = self.Bvec(v)
+
+        c_vec = \
+            np.concatenate([
+                M_inv.solve(i) for i in np.array_split(Bv, 2) ])
+
+        f = self._solver.nonlinear_residual
+        f_vec = np.concatenate( [-c_vec, v] )
+
+        # compute finite-difference step size.
+        nf = np.linalg.norm(f_vec)
+        if nf == 0:
+            return 0 * v
+        sc = self.omega / nf
+
+        f_vec = self.add_bc_full( self.x0 + sc * f_vec )
+
+        return \
+            ( f( f_vec )[self._g.dofindices] - self.f0[-self._Nnonlinear:] ) / sc
+
+    @InstanceMethodCache
+    def solve( self, rhs, tol=0 ):
+
+        # Solve the Schur-complement problem.
+        rhs_ = self.collapse_rhs(rhs)
+        dx = optimize.nonlin.KrylovJacobian.solve( self, rhs_, tol=tol )
+
+        # Solve for |du|.
+        du = np.concatenate([ self.M_inv.solve(i) for i in
+            np.array_split(self.split( rhs )[0] - self.Bvec(dx), 2)
+        ])
+        return np.concatenate([ du, dx ])
+
+    def setup( self, *args, **kwargs ):
+        if self.preconditioner is not None:
+            raise NotImplementedError
+        optimize.nonlin.KrylovJacobian.setup( self, *args, **kwargs )
+
+        '''
+            overwrite self.op set in ``optimize.nonlin.Krylovjacobian.setup
+            since the Schur-complement is of dimension (n, n) rather than
+            (self._N, self._N). If this is not done, ``self.solve`` throws
+            an error.
+        '''
+
+        n = self._Nnonlinear
+        self.op = sparse.linalg.LinearOperator( shape=(n, n), matvec=self.matvec )
+
+
+class MixedFEMParametricControl( EllipticParametricControl ):
+
+    """
+        Same as EllipticParametricControl, but allows for
+        C^0-continuities.
+    """
+
+    def __new__( cls, g, order, f=None, **kwargs ):
+
+        '''
+            If the control mapping ``f`` is None return an instantiation
+            of standard EGG.
+            Else, return an instantiation of this class.
+        '''
+
+        if f is None:
+            log.info( 'No control mapping passed, proceeding with standard MixedFEM' )
+            return MixedFEM( g, order, **kwargs )
+
+        return Elliptic.__new__(cls)
+
+    def __init__( self, g, *args, f=None, **kwargs ):
+
+        '''
+            Unfortunately, we need to repeat the MixedFEM
+            initialization because we should not inherit from
+            MixedFEM and EllipticControl.
+        '''
+
+        coordinate_directions = c0( g )
+
+        assert len( coordinate_directions ) in (1, 2) and \
+            all( i in (0, 1) for i in coordinate_directions )
+
+        if len( coordinate_directions ) == 2:
+            raise NotImplementedError
+
+        super().__init__( g, *args, f=f, **kwargs )
+
+        self._coordinate_directions = coordinate_directions
+
+    @property
+    def M_inv( self ):
+        if not hasattr( self, '_M_inv' ):
+            self._M_inv = sparse.linalg.splu( self.M.tocsc() )
+        return self._M_inv
+
+    @mixed_FEM_BC
+    def residual( self, c: NamedArray ):
+
+        '''
+            Residual for Newton-Krylov.
+            The first two block-entries are scaled by the inverse
+            of the mass matrix for better convergence.
+        '''
+
+        u, v, x, y = list(c)
+        f, s = self.fderivs, self.sderivs
+        g11, g12, g22 = self.metric( np.concatenate( [x, y] ) )
+
+        # index in (0, 1) for now, index == (0, 1) is not supported yet
+        index = self._coordinate_directions[0]
+
+        scale = g11 + g22 + self._eps
+        arr = self.jitarray
+
+        proj = lambda n, m: n - self.M_inv.solve( arr( self.fderivs(m)[index] ) )
+        res0 = np.concatenate( [ proj(n, m) for n, m in zip( [u, v], [x, y] ) ] )
+
+        if index == 0:
+            mul0 = g22 * f(u)[0] - g12 * f(u)[1] - g12 * s(x)[1] + g11 * s(x)[2]
+            mul1 = g22 * f(v)[0] - g12 * f(v)[1] - g12 * s(y)[1] + g11 * s(y)[2]
+        else:
+            mul0 = g22 * s(x)[0] - g12 * f(u)[0] - g12 * s(x)[1] + g11 * f(u)[1]
+            mul1 = g22 * s(y)[0] - g12 * f(v)[0] - g12 * s(y)[1] + g11 * f(v)[1]
+
+        P11 = self._P11
+        P12 = self._P12
+        P22 = self._P22
+
+        S = g22 * P11[0] - 2 * g12 * P12[0] + g11 * P22[0]
+        T = g22 * P11[1] - 2 * g12 * P12[1] + g11 * P22[1]
+
+        mul0 += S * f(x)[0] + T * f(x)[1]
+        mul1 += S * f(y)[0] + T * f(y)[1]
+
+        res1 = np.concatenate( [ arr(mul0 / scale), arr(mul1 / scale) ] )
+        return np.concatenate( [ -res0, res1[self._g.dofindices] ] )
+
+    solve = MixedFEM.solve
+    init = MixedFEM.init
 
 
 def fastsolve( g, method='Elliptic', ischeme=None, intargs=None, **solveargs ):

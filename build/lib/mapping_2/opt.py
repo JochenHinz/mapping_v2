@@ -33,8 +33,7 @@ else:
     del cyipopt
 
 
-def constraint( optimizer, xi, eta, c ):
-
+def constraint( g, xi, eta, c ):
     '''
         Return a vector of Jacobian Determinant
         function evaluations over the tensor-product
@@ -44,13 +43,11 @@ def constraint( optimizer, xi, eta, c ):
         (hence not necessarily g.x).
     '''
 
-    g = optimizer._g
-
     assert len( g ) == g.targetspace == 2, NotImplementedError
 
     x, y = np.array_split( c, 2 )
 
-    _bsplev = lambda c, **kwargs: bisplev( xi, eta, optimizer._tck(c), **kwargs ).ravel()
+    _bsplev = lambda c, **kwargs: bsplev( xi, eta, g, c, **kwargs )
 
     x_xi = _bsplev( x, dx=1 )
     x_eta = _bsplev( x, dy=1 )
@@ -93,7 +90,7 @@ def assemble_sparse_times_dense( Dense, m, indices0, indices1, data ):
     return ret
 
 
-def constraint_jacobian( optimizer, xi, eta, c, w_xi, w_eta ):
+def constraint_jacobian( g, xi, eta, c, w_xi, w_eta ):
 
     '''
         Assemble the discrete constraint jacobian
@@ -104,9 +101,6 @@ def constraint_jacobian( optimizer, xi, eta, c, w_xi, w_eta ):
         over all constraint abscissae of the first derivatives of all
         the basis functions (per row).
     '''
-
-    g = optimizer._g
-    
     assert len( g ) == g.targetspace == 2, NotImplementedError
 
     x, y = np.array_split( c, 2 )
@@ -114,7 +108,7 @@ def constraint_jacobian( optimizer, xi, eta, c, w_xi, w_eta ):
     # XXX: this is a repetition from the ``jacobian`` function.
     # Find a more compact solution
 
-    _bsplev = lambda c, **kwargs: bisplev( xi, eta, optimizer._tck(c), **kwargs ).ravel()
+    _bsplev = lambda c_, **kwargs: bsplev( xi, eta, g, c_, **kwargs )
 
     x_xi = _bsplev( x, dx=1 )
     x_eta = _bsplev( x, dy=1 )
@@ -196,24 +190,20 @@ class ConstrainedMinimizer( FastSolver ):
 
         self._absc = absc
 
-        self._gradeval = 0
-        self._feval = 0
-        self._conseval = 0
-        self._consgradeval = 0
-
         if absc is not None:
             assert all(
                 all( [aux.isincreasing(x_), x_[0] >= 0, x_[-1] <= 1] )
                                                     for x_ in absc ), \
                 'Invalid constraint abscissae received.'
 
-            _bsplev = lambda i, **kwargs: sparse.csr_matrix(
-                    self._splev( i, self._absc, **kwargs ).ravel()[:, None]
-            )
+            _bsplev = lambda x, **kwargs: sparse.csr_matrix(
+                bsplev( *self._absc, g, x, **kwargs )[:, None] )
 
-            structure = sparse.hstack( [ _bsplev(i) for i in range(self._N) ] )
-            self._w_xi = sparse.hstack( [ _bsplev(i, dx=1) for i in range(self._N) ] )
-            self._w_eta = sparse.hstack( [ _bsplev(i, dy=1) for i in range(self._N) ] )
+            I = np.eye( len(g.basis) )
+
+            structure = sparse.hstack( [ _bsplev(i) for i in I ] )
+            self._w_xi = sparse.hstack( [ _bsplev(i, dx=1) for i in I ] )
+            self._w_eta = sparse.hstack( [ _bsplev(i, dy=1) for i in I ] )
 
             # sparsity structure of the constraint jacobian
             self.jacobianstructure = \
@@ -239,10 +229,8 @@ class ConstrainedMinimizer( FastSolver ):
         if self._absc is None:
             raise AssertionError('No constraints set.')
 
-        self._conseval += 1
-
         log.info( 'Computing constraint ...' )
-        ret = constraint( self, *self._absc, c )
+        ret = constraint( g, *self._absc, c )
         log.info( 'Completed' )
 
         return ret
@@ -258,11 +246,9 @@ class ConstrainedMinimizer( FastSolver ):
         log.info( 'Computing constraint gradient ...' )
 
         ret = constraint_jacobian(
-            self, *self._absc, c, self._w_xi, self._w_eta )[:, d]
+            self._g, *self._absc, c, self._w_xi, self._w_eta )[:, d]
 
         log.info( 'Completed' )
-
-        self._consgradeval += 1
 
         if not sprs:
             return ret
@@ -292,8 +278,6 @@ class Liao( ConstrainedMinimizer ):
     @with_scalar_boundary_conditions
     def residual( self, c ):
 
-        self._feval += 1
-
         g11, g12, g22 = self.metric( c )
         ret = ( self._weights * ( g11 ** 2 + 2 * g12 ** 2 + g22 ** 2 ) ).sum()
 
@@ -303,8 +287,6 @@ class Liao( ConstrainedMinimizer ):
 
     @fsol.with_boundary_conditions
     def gradient( self, c ):
-
-        self._gradeval += 1
 
         (x_xi, x_eta), (y_xi, y_eta) = self.all_fderivs(c)
         g11, g12, g22 = self.metric( c )
@@ -339,9 +321,6 @@ class Winslow( ConstrainedMinimizer ):
 
     @with_scalar_boundary_conditions
     def residual( self, c ):
-
-        self._feval += 1
-
         J = self.jacdet(c)
         (x_xi, x_eta), (y_xi, y_eta) = self.all_fderivs(c)
         return ( self._weights *
@@ -349,9 +328,6 @@ class Winslow( ConstrainedMinimizer ):
 
     @fsol.with_boundary_conditions
     def gradient( self, c ):
-
-        self._gradeval += 1
-
         J = self.jacdet(c)
         (x_xi, x_eta), (y_xi, y_eta) = self.all_fderivs(c)
         trace = self.metric_trace(c)
@@ -373,9 +349,6 @@ class AO( ConstrainedMinimizer ):
 
     @with_scalar_boundary_conditions
     def residual( self, c ):
-
-        self._feval += 1
-
         g11, g12, g22 = self.metric( c )
         ret = ( self._weights * ( g11 * g22 ) ).sum()
         log.info( ret )
@@ -384,14 +357,7 @@ class AO( ConstrainedMinimizer ):
     @fsol.with_boundary_conditions
     def gradient( self, c ):
 
-        self._gradeval += 1
-
         log.info( 'Computing gradient' )
-
-        if not hasattr( self, '_gradeval' ):
-            self._gradeval = 0
-
-        self._gradeval += 1
 
         (x_xi, x_eta), (y_xi, y_eta) = self.all_fderivs(c)
         g11, g12, g22 = self.metric( c )
@@ -414,9 +380,6 @@ class Area( ConstrainedMinimizer ):
 
     @with_scalar_boundary_conditions
     def residual( self, c ):
-
-        self._feval += 1
-
         J = self.jacdet(c)
         ret = ( self._weights * J ** 2 ).sum()
         log.info( ret )
@@ -424,9 +387,6 @@ class Area( ConstrainedMinimizer ):
 
     @fsol.with_boundary_conditions
     def gradient( self, c ):
-
-        self._gradeval += 1
-
         J = self.jacdet(c)
         (x_xi, x_eta), (y_xi, y_eta) = self.all_fderivs(c)
 
@@ -539,20 +499,11 @@ def minimize( g, order=6, constraints=5, inplace=True, method='Liao', **kwargs )
 
     constraint_gradient = lambda *args, **kwargs: \
         optimizer.constraint_gradient( *args, sprs=True, **kwargs )
-    constraints = [{ 'type': 'ineq', 'fun': optimizer.constraint,
+    constraints = [ { 'type': 'ineq', 'fun': optimizer.constraint,
         'jac': constraint_gradient }]
 
     solution = minimize_ipopt_sparse( fun, x0, jacobianstructure,
         jac=jac, constraints=constraints, **kwargs )
-
-    log.info(
-        '''
-            Converged after {} function evaluations, {} gradient evaluations,
-            {} constraint evaluations and {} constraint gradient evaluations.
-        '''
-        .format( optimizer._feval, optimizer._gradeval,
-                    optimizer._conseval, optimizer._consgradeval)
-        )
 
     if not inplace:
         return solution

@@ -7,7 +7,7 @@ is the core class that represents a mapping with tensor-product B-splines.
 It can be manipulated in very much the same way as :class:`ko.TensorKnotObject`,
 while the mapping is always preserved, unless an operation leads to a coarser
 knot-vector, in which case it is preserved in the least-squares sense.
-It also links the :mod:`sol` which allows for the quick generation of
+It also links the :mod:`solver` which allows for the quick generation of
 mappings using the command TensorGridObject.solve(**kwargs). The boundary conditions
 have to be specified using the TensorGridObject.cons attribute and the initial guess,
 unless specified differently, defaults to transfinite interpolation.
@@ -15,18 +15,19 @@ unless specified differently, defaults to transfinite interpolation.
 
 import numpy as np
 import scipy as sp
+from scipy import linalg, interpolate
+from nutils import mesh, util, function, plot, log
+from . import ko, idx, aux
+from matplotlib import pyplot
+from collections import defaultdict, ChainMap
 import functools
-from scipy import interpolate
-from nutils import util, function, plot, log
-from . import ko, idx, aux, jitBSpline
-from collections import ChainMap
 
 gauss = lambda x: 'gauss{}'.format(x)
 
 _ = np.newaxis
 
 
-def prolong_x( g, to: ko.TensorKnotObject ):
+def refine_x( g, to: ko.TensorKnotObject ):
     Ts = [ aux.prolongation_matrix( kvold, kvnew ) for kvold, kvnew in zip(g.knotvector, to) ]
     T = functools.reduce( np.kron, Ts ) if len(Ts) > 1 else Ts[0]
     return sp.linalg.block_diag( *[T] * g.targetspace ).dot( g.x )
@@ -38,7 +39,7 @@ def refine_GridObject( g, to: ko.TensorKnotObject ):
     d['knotvector'] = to
     d['domain'], d['geom'] = aux.rectilinear( to.knots, periodic=to.periodic, bnames=g.domain._bnames )
     ret = g._constructor( **d )
-    ret.x = prolong_x( g, to )
+    ret.x = refine_x( g, to )
     return ret
 
 
@@ -114,10 +115,9 @@ refinefuncs = ('ref_by', 'ref_by_vertices', 'ref', 'add_c0', \
 @withinheritance('knotvector', properties=props, funcs=funcs, refinefuncs=refinefuncs)
 class TensorGridObject:
 
-
     """ Various auxilliary functions """
 
-    def _defaultvec( name, default=np.zeros ):
+    def _defaultvec(name, default=np.zeros):
         """
             if vec is None this defaults to default(appropriate length)
             else vec is rejected if len(vec) != appropriate length
@@ -145,7 +145,7 @@ class TensorGridObject:
             self._cons[ self.index.boundary(side).flatten ] = self[ side ]
 
     _constructor = lambda self, *args, **kwargs: self.__class__( *args, **kwargs )  # default constructor can be overwritten
-
+    
     """ classmethods """
 
     @classmethod
@@ -154,7 +154,7 @@ class TensorGridObject:
         if len(key) == 1:
             side, = key
             d = parent.__dict__.copy()
-            d['domain'] = d['domain'].boundary[side]
+            d['_domain'] = d['_domain'].boundary[side]
 
             # flatten appropriate axis
             bnames = parent.domain._bnames
@@ -208,11 +208,11 @@ class TensorGridObject:
 
         if domain is not None:
             assert geom is not None
-        else:
-            domain, geom = aux.rectilinear( self.knotvector.knots, periodic=self.knotvector.periodic )
-        self.domain, self.geom = domain, geom
+        # else:
+        #     domain, geom = aux.rectilinear( self.knotvector.knots, periodic=self.knotvector.periodic )
+        self._domain, self._geom = domain, geom
 
-        assert self.domain.ndims == len( knotvector.ndims )
+        assert self.domain.ndims == len( knotvector.ndims ) 
         self.set_basis()
         assert knotvector.dim == len( self.basis )  # hereby it's tested if knotvector and domain are compatible
 
@@ -225,6 +225,23 @@ class TensorGridObject:
     x = property(_getprivate('x'), set_x)
     cons = property(_getprivate('cons'), set_cons)
     basis = property( fget=_getprivate('basis') )
+
+    @property
+    def domain( self ):
+        if self._domain is None:
+            self._domain, self._geom = aux.rectilinear( 
+                        self.knotvector.knots, periodic=self.knotvector.periodic
+                    )
+        return self._domain
+
+    @property
+    def geom( self ):
+        if self._geom is None:
+            self._domain, self._geom = aux.rectilinear( 
+                        self.knotvector.knots, periodic=self.knotvector.periodic
+                    )
+        return self._geom
+
 
     @property
     def dim(self):
@@ -335,33 +352,16 @@ class TensorGridObject:
 
         return ( self.domain.refine(ref).elem_eval( self.jacdet, geometry=self.geom, ischeme=gauss( ischeme ) ) > 0 ).all()
 
-    """ Staticmethods """
+    """ Operator overloading """
 
     @staticmethod
     def are_nested( leader, follower ):
         return any( [ leader <= follower, follower <= leader ] )
 
     @staticmethod
-    def fastunify( *args ):
-        """
-            Unify all input TensorGridObjects but only return the prolonged
-            x-vectors and the corresponding knotvector.
-        """
-        if len( args ) == 1:
-            g = args[ 0 ]
-            return [ g.x ], g.knotvector
-        unified_knotvector = functools.reduce( lambda x, y: x + y, [ g.knotvector for g in args ] )
-        xs = []
-        for i, g in enumerate( args ):
-            print( i )
-            xs.append( prolong_x( g, unified_knotvector ) )
-        # xs = [ prolong_x( g, unified_knotvector ) for g in args ]
-        return xs, unified_knotvector
-
-    @staticmethod
     def unify( *args ):
         """
-            Unify all input TensorGridObjects to one unified GridObject.
+            unify all input TensorGridObjects to one unified grid
         """
         assert all( isinstance( g, TensorGridObject ) for g in args )
         if len( args ) == 1:
@@ -370,37 +370,41 @@ class TensorGridObject:
         return [ unified ] + [ refine_GridObject( g, unified.knotvector ) for g in args[1:] ]
 
     @staticmethod
-    def prolong_and_interpolate_x( verts, grids, return_knotvector=False, **scipyargs ):
+    def fastunify( *args ):
+        """
+            unify all input TensorGridObjects but only return the prolonged
+            x-vectors and the resulting knotvector
+        """
+        if len( args ) == 1:
+            g = args[ 0 ]
+            return [ g.x ], g.knotvector
+        unified_knotvector = functools.reduce( lambda x, y: x + y, [ g.knotvector for g in args ] )
+        xs = [ refine_x( g, unified_knotvector ) for g in args ]
+        return xs, unified_knotvector
+
+    @staticmethod
+    def grid_interpolation( verts, grids, **scipyargs ):
         assert len( grids ) > 1
         assert len( verts ) == len( grids )
         assert aux.isincreasing( verts )
 
+        if len( verts ) == 1:
+            return lambda x: grids[0]
+        
         scipyargs.setdefault( 'k', min( 5, len( grids ) - 1 ) )
         scipyargs.setdefault( 'ext', 0 )
 
         assert scipyargs[ 'k' ] <= len( grids ) - 1
 
-        xs, unified_knotvector = grids[0].__class__.fastunify( *grids )
-        A = np.stack( xs, axis=1 )
-
-        def intpfunc( s ):
-            return np.array( [ interpolate.InterpolatedUnivariateSpline( verts, a, **scipyargs)( s ) for a in A ] )
-
-        if return_knotvector:
-            return intpfunc, unified_knotvector
-
-        return intpfunc
-
-    @staticmethod
-    def grid_interpolation( verts, grids, **scipyargs ):
-
-        intpfunc, unified_knotvector = grids[ 0 ].__class__.prolong_and_interpolate_x( verts, grids, return_knotvector=True, **scipyargs )
-        targetspace = grids[ 0 ].targetspace
+        unified = grids[0].__class__.unify( *grids )
+        intpfunc = lambda A, s: np.array( [ interpolate.InterpolatedUnivariateSpline( verts, a, **scipyargs)( s ) for a in A ] )
 
         def ret( s ):
-            g = grids[ 0 ]._constructor( knotvector=unified_knotvector, targetspace=targetspace )
-            g.x = intpfunc( s )
-            return g
+            A = np.stack( [ g.x for g in unified ], axis=1 )
+            _g = unified[0].empty_copy()
+            intpfunc_ = lambda s: intpfunc( A, s )
+            _g.x = intpfunc_( s )
+            return _g
 
         return ret
 
@@ -422,8 +426,6 @@ class TensorGridObject:
     subdim = lambda x, y: len( y ) == len( x ) - 1
     same_degree = lambda x, y: x.degree == y.degree
     not_periodic = lambda x, y: all( [ len( x.periodic ), len( y.periodic ) == 0 ] )
-
-    """ Operator overloading """
 
     @requires_dependence( samedim, sameclass, same_degree )
     def __add__( self, other ):
@@ -449,8 +451,7 @@ class TensorGridObject:
         return decorated
 
     @plotting_requirements
-    def plot_function(self, func=[], ischeme='bezier5', ref=0,
-                                                boundary=False, show=True, **plotkwargs):
+    def plot_function(self, func=[], ischeme='bezier5', ref=0, boundary=False, **plotkwargs):
         assert self.targetspace == 2, NotImplementedError
         plt = plot.PyPlot( 'I am a dummy', **plotkwargs )
         domain = self.domain if not boundary else self.domain.boundary
@@ -467,43 +468,12 @@ class TensorGridObject:
         else:
             raise NotImplementedError
 
-        if show:
-            plt.show()
-
-    def qplot( self, ref=6, boundary=False, edgecolors='k', edgewidth=0.3 ):
-
-        assert len( self ) == 2
-
-        g = self.toscipy()
-
-        import matplotlib.pyplot as plt
-        from matplotlib.collections import LineCollection
-
-        fig, ax = plt.subplots()
-        ax.set_aspect( 'equal' )
-
-        k = self.knotvector
-
-        xieta = [k.ref( K ).knots for K in ( [0, ref], [ref, 0] ) ]
-
-        if boundary:
-            xieta[0][0] = xieta[0][0][ [0, -1] ]
-            xieta[1][1] = xieta[1][1][ [0, -1] ]
-
-        for i, ( xi, eta ) in enumerate( xieta ):
-            X = g( xi, eta )
-            ax.set_xlim(X[..., 0].min(), X[..., 0].max())
-            ax.set_ylim(X[..., 1].min(), X[..., 1].max())
-            line_segments = LineCollection(
-                    X if not i else X.swapaxes(0, 1),
-                    linewidth=edgewidth,
-                    color=edgecolors )
-            ax.add_collection(line_segments)
-
         plt.show()
 
+    def qplot( self, **kwargs ):
+        self.plot_function( **kwargs )
+
     def qbplot( self, **kwargs ):
-        assert 'boundary' not in kwargs.keys()
         self.qplot( boundary=True, **kwargs )
 
     def qgplot( self, **plotkwargs ):
@@ -515,6 +485,7 @@ class TensorGridObject:
         plt.show()
 
     def plot( self, name, funcs={}, ref=0, boundary=False ):
+        # assert len( self ) == 2
         domain = self.domain if not boundary else self.domain.boundary
         points, det, *fncs = domain.refine( ref ).elem_eval( [ self.mapping, self.jacdet ] + [ funcs[ item ] for item in funcs.keys() ], ischeme='vtk', separate=True )
         with plot.VTKFile( name ) as vtu:
@@ -522,6 +493,7 @@ class TensorGridObject:
             vtu.pointdataarray( 'Jacobian_Determinant', det )
             for name, func in zip( funcs.keys(), fncs ):
                 vtu.pointdataarray( name, func )
+
 
     ''' Exporting '''
 
@@ -573,50 +545,12 @@ class TensorGridObject:
         else:
             raise NotImplementedError
 
-    def call( self, *args, format_='gismo', **kwargs ):
-
-        if len( self ) != 2:
-            raise NotImplementedError
-
-        assert len( args ) == len( self )
-
-        length = len( args[0] )
-        assert all( len(a) == length for a in args )
-
-        ret = jitBSpline.call( self, *args, **kwargs )
-
-        if format_ == 'gismo':
-            return ret
-        else:
-            raise Exception("Unknown format '{}'".format( format_ ) )
-
-    def tcall( self, *args, **kwargs ):
-
-        if len( self ) != 2:
-            raise NotImplementedError
-
-        assert len( args ) == len( self )
-
-        return jitBSpline.tcall( self, *args, **kwargs )
-
 
     del _defaultvec
     del _getprivate
 
 
-def z_stack( gos, verts, p=1, target_TensorGridObject=None ):
-
-    """
-    Stack a number of ``TensorGridObjects`` in the z-direction.
-
-    Parameters
-    ----------
-    gos: list of TensorGridObjects.
-    verts: vertices at which to place the bivariate g in ``gos`` on the z-axis.
-    p: order of interpolation.
-    target_TensorGridObject: optional, if provided, the control points resulting
-    from the interpolation are exportet to target_TensorGridObject.x.
-    """
+def z_stack( gos, verts, p=1 ):
 
     if p != 1:
         raise NotImplementedError
@@ -625,14 +559,11 @@ def z_stack( gos, verts, p=1, target_TensorGridObject=None ):
 
     xs, unified_knotvector = TensorGridObject.fastunify( *gos )
 
-    if target_TensorGridObject is None:
-        z = np.linspace( 0, 1, len( gos ) )
-        z_knotvector = ko.KnotObject( knotvalues=z, degree=p )
+    z = np.linspace( 0, 1, len( gos ) )
+    z_knotvector = ko.KnotObject( knotvalues=z, degree=p )
 
-        g = TensorGridObject( knotvector=unified_knotvector*z_knotvector )
-
-    n = np.prod( unified_knotvector.ndims ) if not target_TensorGridObject \
-        else np.prod( target_TensorGridObject.knotvector.ndims[ :2 ] )
+    g = TensorGridObject( knotvector=unified_knotvector*z_knotvector )
+    n = np.prod( unified_knotvector.ndims )
 
     for j in range( len( z ) ):
         g.x[ g.index[ :, :, j ][ : 2*n ] ] = xs[ j ]

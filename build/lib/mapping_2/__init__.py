@@ -22,13 +22,8 @@ import sys, numpy
 from distutils.version import LooseVersion
 
 assert sys.version_info >= (3, 3)
-assert LooseVersion(numpy.version.version) >= LooseVersion('1.8'), \
-    'mapping requires numpy 1.8 or higher, got %s' % numpy.version.version
+assert LooseVersion(numpy.version.version) >= LooseVersion('1.8'), 'mapping requires numpy 1.8 or higher, got %s' % numpy.version.version
 
 version = '2beta'
 
-__all__ = [ 'aux', 'go', 'idx',
-             'ko', 'pc', 'prep',
-           'proj', 'rep', 'sol', 
-           'std', 'tb', 'xml',
-           'fsol', 'jitBSpline', 'opt', 'con' ]
+__all__ = [ 'aux', 'go', 'idx', 'ko', 'pc', 'prep', 'proj', 'rep', 'sol', 'std', 'tb', 'xml', 'fsol', 'jitBSpline', 'opt' ]

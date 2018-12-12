@@ -114,7 +114,6 @@ refinefuncs = ('ref_by', 'ref_by_vertices', 'ref', 'add_c0', \
 @withinheritance('knotvector', properties=props, funcs=funcs, refinefuncs=refinefuncs)
 class TensorGridObject:
 
-
     """ Various auxilliary functions """
 
     def _defaultvec( name, default=np.zeros ):
@@ -470,40 +469,10 @@ class TensorGridObject:
         if show:
             plt.show()
 
-    def qplot( self, ref=6, boundary=False, edgecolors='k', edgewidth=0.3 ):
-
-        assert len( self ) == 2
-
-        g = self.toscipy()
-
-        import matplotlib.pyplot as plt
-        from matplotlib.collections import LineCollection
-
-        fig, ax = plt.subplots()
-        ax.set_aspect( 'equal' )
-
-        k = self.knotvector
-
-        xieta = [k.ref( K ).knots for K in ( [0, ref], [ref, 0] ) ]
-
-        if boundary:
-            xieta[0][0] = xieta[0][0][ [0, -1] ]
-            xieta[1][1] = xieta[1][1][ [0, -1] ]
-
-        for i, ( xi, eta ) in enumerate( xieta ):
-            X = g( xi, eta )
-            ax.set_xlim(X[..., 0].min(), X[..., 0].max())
-            ax.set_ylim(X[..., 1].min(), X[..., 1].max())
-            line_segments = LineCollection(
-                    X if not i else X.swapaxes(0, 1),
-                    linewidth=edgewidth,
-                    color=edgecolors )
-            ax.add_collection(line_segments)
-
-        plt.show()
+    def qplot( self, **kwargs ):
+        self.plot_function( **kwargs )
 
     def qbplot( self, **kwargs ):
-        assert 'boundary' not in kwargs.keys()
         self.qplot( boundary=True, **kwargs )
 
     def qgplot( self, **plotkwargs ):

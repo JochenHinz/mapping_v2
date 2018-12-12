@@ -3,14 +3,12 @@
 
 import numpy as np
 from nutils import *
-from nutils import function, util, solver
 from collections import defaultdict
-from . import go
 
-sidetonumber_reversed = lambda g: dict( [ (side, i//2) for side, i in
+sidetonumber_reversed = lambda g: dict( [ (side, i//2) for side, i in 
                             zip( reversed( g.sides ), range( len( g.sides ) ) ) ] )
 
-sidetonumber = lambda g: dict( [ (side, i//2) for side, i in
+sidetonumber = lambda g: dict( [ (side, i//2) for side, i in 
                             zip( g.sides, range( len( g.sides ) ) ) ] )
 
 bundledsides = lambda g: list( zip( g.sides[::2], g.sides[1::2] ) )
@@ -107,7 +105,7 @@ def method_library( g, method='Elliptic', degree=None):
         G = s( [ s( [ g22, -g12 ] ), s( [ -g12, g11 ] ) ], axis=1 )
         lapl = ( J.grad( g.geom ) * G[ None ] ).sum( [1, 2] )
         res = ( g.basis.vector(2) * lapl ).sum( -1 )
-        res /= ( 1 if method == 'Elliptic_unscaled' else ( g11 + g22 + 0.0001 ) )
+        res /= ( 1 if method == 'Elliptic_unscaled' else ( g11 + g22 ) )
         res = g.domain.integral( res, geometry=g.geom, degree=degree )
 
     elif method == 'Elliptic_forward':
@@ -126,7 +124,7 @@ def method_library( g, method='Elliptic', degree=None):
     elif method == 'Liao':
         G = metric_tensor( g, target )
         ( ( g11, g12 ), ( g21, g22 ) ) = G
-        res = g.domain.integral( g11 ** 2 + g12 **2 + g22 ** 2, geometry=g.geom, degree=degree ).derivative( 'target' )
+        res = g.domain.integral( g11 ** 2 + 2 * g12 **2 + g22 ** 2, geometry=g.geom, degree=degree ).derivative( 'target' )
 
     else:
         raise 'Unknown method {}'.format( method )
@@ -136,7 +134,7 @@ def method_library( g, method='Elliptic', degree=None):
 
 def mixed_fem( g, ltol=1e-5, coordinate_directions=None, **solveargs ):
     assert len( g ) == 2
-    n = len( g.x )
+    n = len ( g.x )
     basis = g.basis
 
     def c0( g ):
@@ -155,8 +153,7 @@ def mixed_fem( g, ltol=1e-5, coordinate_directions=None, **solveargs ):
     U = g.basis.vector( veclength ).dot( target )
 
     G = metric_tensor( g, target[ -n: ] )
-    ( g11, g12 ), ( g21, g22 ) = G
-
+    ( ( g11, g12 ), ( g21, g22 ) ) = G
     scale = g11 + g22
 
     if len( coordinate_directions ) == 2:
@@ -181,16 +178,12 @@ def mixed_fem( g, ltol=1e-5, coordinate_directions=None, **solveargs ):
     res = g.domain.integral( res, geometry=g.geom, degree=g.ischeme*4 )
 
     mapping0 = g.basis.vector( 2 ).dot( g.x )
-
+    
     cons = util.NanVec( n * ( len( coordinate_directions ) + 1 ) )
     cons[ -n: ] = g.cons
     init = np.concatenate( [ g.domain.project( mapping0.grad( g.geom )[:, i], geometry=g.geom, onto=g.basis.vector( 2 ), ischeme='gauss12' ) for i in coordinate_directions ] + [ g.x ] )
 
-    lhs = solver.newton(
-        'target',
-        res,
-        lhs0=init,
-        constrain=cons.where ).solve( ltol, **solveargs )
+    lhs = solver.newton( 'target', res, lhs0=init , constrain=cons.where ).solve( ltol, **solveargs )
 
     g.x = lhs[ -n: ]
 
@@ -198,85 +191,12 @@ def mixed_fem( g, ltol=1e-5, coordinate_directions=None, **solveargs ):
 def solve_nutils( g, method='Elliptic', ltol=1e-5, **solveargs ):
     assert len( g ) == 2
 
+    target = function.Argument( 'target', [ len( g.x ) ] )
+
     res = method_library( g, method=method )
 
     init, cons = g.x, g.cons
-    lhs = solver.newton(
-        'target',
-        res,
-        lhs0=init,
-        constrain=cons.where ).solve( ltol, **solveargs )
-
-    g.x = lhs
-
-
-solve = solve_nutils
-
-
-def elliptic_control_mapping( g, f, eps=1e-4, ltol=1e-5, degree=None, **solveargs ):
-
-    '''
-        Nutils implementation of the corresponding method from the ``fsol`` module.
-        It's slower but accepts any control mapping function. Unline in the ``fsol``
-        case, all derivatives are computed automatically.
-    '''
-
-    assert len(g) == len(f) == 2
-    assert eps >= 0
-
-    if degree is None:
-        degree = 4 * g.ischeme
-
-    if isinstance( f, go.TensorGridObject ):
-        if not ( f.knotvector <= g.knotvector ).all():
-            raise AssertionError(
-                '''
-                    Error, the control-mapping knotvector needs
-                    to be a subset of the target GridObject knotvector
-                '''
-            )
-
-        # refine, just in case
-        f = go.refine_GridObject( f, g.knotvector )
-        G = metric_tensor( g, f.x )
-    else:
-        # f is a nutils function
-        jacT = function.transpose( f.grad(g.geom) )
-        G = function.outer( jacT, jacT ).sum( -1 )
-
-    target = function.Argument( 'target', [ len(g.x) ] )
-    basis = g.basis.vector(2)
-    x = basis.dot( target )
-
-    ( g11, g12 ), ( g21, g22 ) = metric_tensor( g, target )
-    lapl = g22 * x.grad(g.geom)[:, 0].grad(g.geom)[:, 0] - \
-        2 * g12 * x.grad(g.geom)[:, 0].grad(g.geom)[:, 1] + \
-        g11 * x.grad(g.geom)[:, 1].grad(g.geom)[:, 1]
-
-    G_tilde = G / function.sqrt( function.determinant(G) )
-    (G11, G12), (G12, G22) = G_tilde
-
-    P = g11 * G12.grad(g.geom)[1] - g12 * G11.grad(g.geom)[1]
-    Q = 0.5 * ( g11 * G22.grad(g.geom)[0] - g22 * G11.grad(g.geom)[0] )
-    S = g12 * G22.grad(g.geom)[0] - g22 * G12.grad(g.geom)[0]
-    R = 0.5 * ( g11 * G22.grad(g.geom)[1] - g22 * G11.grad( g.geom )[1] )
-
-    control_term = -x.grad( g.geom )[:, 0] * ( G22*(P-Q) + G12*(S-R) ) \
-                   -x.grad( g.geom )[:, 1] * ( G11*(R-S) + G12*(Q-P) )
-
-    scale = g11 + g22 + eps
-
-    res = g.domain.integral(
-        ( basis * (control_term + lapl) ).sum(-1) / scale,
-        geometry=g.geom, degree=degree )
-
-    init, cons = g.x, g.cons
-    lhs = solver.newton(
-        'target',
-        res,
-        lhs0=init,
-        constrain=cons.where
-    ).solve( ltol, **solveargs )
+    lhs = solver.newton( 'target', res, lhs0=init , constrain=cons.where ).solve( ltol, **solveargs )
 
     g.x = lhs
 
